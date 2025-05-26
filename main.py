@@ -27,6 +27,10 @@ def init_session_state():
         st.session_state["selected_videos"] = []
     if "video_list_loaded" not in st.session_state:
         st.session_state["video_list_loaded"] = False
+    if "search_results" not in st.session_state:
+        st.session_state["search_results"] = []
+    if "processing_complete" not in st.session_state:
+        st.session_state["processing_complete"] = False
 
 # 요약 처리 함수
 def process_summaries():
@@ -62,7 +66,8 @@ def process_summaries():
         
         try:
             # 1. 자막 수집
-            transcript = get_transcript(video_id)
+            with st.spinner(f"자막 수집 중: {video_title[:30]}..."):
+                transcript = get_transcript(video_id)
             
             if not transcript:
                 results_container.error(f"❌ 자막 수집 실패: {video_title}")
@@ -71,19 +76,25 @@ def process_summaries():
             # 2. 자막 정리
             clean_text = clean_transcript(transcript)
             
+            if len(clean_text.strip()) < 100:
+                results_container.warning(f"⚠️ 자막이 너무 짧음: {video_title}")
+                continue
+            
             # 3. AI 요약
-            summary_data = summarize_transcript(
-                clean_text, 
-                video_title, 
-                st.session_state["selected_channel_title"]
-            )
+            with st.spinner(f"AI 요약 중: {video_title[:30]}..."):
+                summary_data = summarize_transcript(
+                    clean_text, 
+                    video_title, 
+                    st.session_state["selected_channel_title"]
+                )
             
             if not summary_data:
                 results_container.error(f"❌ 요약 실패: {video_title}")
                 continue
             
             # 4. Notion 저장
-            save_success = save_summary_to_notion(summary_data, video_id)
+            with st.spinner(f"저장 중: {video_title[:30]}..."):
+                save_success = save_summary_to_notion(summary_data, video_id)
             
             if save_success:
                 results_container.success(f"✅ 완료: {video_title}")
@@ -94,8 +105,9 @@ def process_summaries():
         except Exception as e:
             results_container.error(f"❌ 오류 발생: {video_title} - {str(e)}")
         
-        # API 호출 간격
-        time.sleep(1)
+        # API 호출 간격 (부하 방지)
+        if i < total_videos - 1:  # 마지막이 아니면 대기
+            time.sleep(2)
     
     # 완료 메시지
     progress_bar.progress(1.0)
@@ -104,6 +116,7 @@ def process_summaries():
     if success_count > 0:
         st.balloons()
         st.success(f"🎉 총 {success_count}개 영상 요약 완료!")
+        st.session_state["processing_complete"] = True
     else:
         st.error("요약에 실패했습니다. 설정을 확인해주세요.")
 
@@ -134,28 +147,47 @@ def show_summary_page():
     # STEP 1: 채널 검색 및 선택
     if st.session_state["selected_channel"] is None:
         st.subheader("1️⃣ 유튜버 채널 선택")
-        query = st.text_input("유튜버 이름을 입력하세요:", placeholder="예: 신사임당, 부읽남")
+        
+        # 폼을 사용하여 상태 관리 개선
+        with st.form("channel_search_form"):
+            query = st.text_input("유튜버 이름을 입력하세요:", placeholder="예: 신사임당, 부읽남")
+            search_submitted = st.form_submit_button("🔍 채널 검색")
 
-        if st.button("🔍 채널 검색") and query:
+        if search_submitted and query:
             with st.spinner("검색 중..."):
-                channels = search_channel(query)
-                if not channels:
-                    st.warning("채널을 찾을 수 없습니다.")
-                else:
-                    st.markdown("---")
-                    st.subheader("검색 결과")
-                    for ch in channels:
-                        col1, col2 = st.columns([1, 4])
+                try:
+                    channels = search_channel(query)
+                    st.session_state["search_results"] = channels
+                except Exception as e:
+                    st.error(f"검색 중 오류 발생: {e}")
+                    st.session_state["search_results"] = []
+        
+        # 검색 결과 표시
+        if st.session_state.get("search_results"):
+            channels = st.session_state["search_results"]
+            if not channels:
+                st.warning("채널을 찾을 수 없습니다.")
+            else:
+                st.markdown("---")
+                st.subheader("검색 결과")
+                for i, ch in enumerate(channels):
+                    with st.container():
+                        col1, col2, col3 = st.columns([1, 4, 1])
                         with col1:
-                            st.image(ch["thumbnail_url"], width=100)
+                            try:
+                                st.image(ch["thumbnail_url"], width=100)
+                            except:
+                                st.write("🖼️")
                         with col2:
                             st.markdown(f"**{ch['channel_title']}**")
-                            st.caption(ch["description"][:200] + "..." if len(ch["description"]) > 200 else ch["description"])
-                            if st.button(f"✅ 이 채널 선택", key=ch["channel_id"]):
+                            description = ch.get("description", "")
+                            st.caption(description[:200] + "..." if len(description) > 200 else description)
+                        with col3:
+                            if st.button(f"선택", key=f"select_channel_{i}"):
                                 st.session_state["selected_channel"] = ch["channel_id"]
                                 st.session_state["selected_channel_title"] = ch["channel_title"]
-                                st.success(f"채널 선택됨: {ch['channel_title']}")
-                                # st.rerun() 제거 - 자동으로 다음 단계로 진행됨
+                                st.session_state["search_results"] = []  # 검색 결과 초기화
+                                st.rerun()
 
     # STEP 2: 채널 선택 이후 영상 목록
     else:
@@ -164,12 +196,15 @@ def show_summary_page():
             st.success(f"✅ 선택된 채널: **{st.session_state['selected_channel_title']}**")
         with col2:
             if st.button("🔄 채널 변경"):
+                # 모든 관련 상태 초기화
                 st.session_state["selected_channel"] = None
                 st.session_state["selected_channel_title"] = None
                 st.session_state["video_list_loaded"] = False
                 st.session_state["video_list"] = []
                 st.session_state["selected_videos"] = []
-                st.success("채널 선택이 초기화되었습니다.")
+                st.session_state["search_results"] = []
+                st.session_state["processing_complete"] = False
+                st.rerun()
 
         st.markdown("---")
         st.subheader("2️⃣ 영상 목록 필터링")
@@ -189,12 +224,17 @@ def show_summary_page():
 
         if st.button("📂 영상 목록 불러오기"):
             with st.spinner("영상 불러오는 중..."):
-                st.session_state["video_list"] = get_videos_from_channel(
-                    st.session_state["selected_channel"], published_after=since
-                )[:max_results]
-                st.session_state["video_list_loaded"] = True
-                st.session_state["selected_videos"] = []
-                st.success(f"✅ {len(st.session_state['video_list'])}개 영상을 불러왔습니다!")
+                try:
+                    videos = get_videos_from_channel(
+                        st.session_state["selected_channel"], 
+                        published_after=since
+                    )
+                    st.session_state["video_list"] = videos[:max_results]
+                    st.session_state["video_list_loaded"] = True
+                    st.session_state["selected_videos"] = []
+                    st.success(f"✅ {len(st.session_state['video_list'])}개 영상을 불러왔습니다!")
+                except Exception as e:
+                    st.error(f"영상 목록 불러오기 실패: {e}")
 
         # STEP 3: 영상 선택
         if st.session_state["video_list_loaded"]:
@@ -209,11 +249,11 @@ def show_summary_page():
                 with col1:
                     if st.button("✅ 전체 선택"):
                         st.session_state["selected_videos"] = [vid["video_id"] for vid in st.session_state["video_list"]]
-                        st.success("모든 영상이 선택되었습니다!")
+                        st.rerun()
                 with col2:
                     if st.button("❌ 전체 해제"):
                         st.session_state["selected_videos"] = []
-                        st.success("선택이 해제되었습니다!")
+                        st.rerun()
                 with col3:
                     st.info(f"📊 총 {len(st.session_state['video_list'])}개 영상, {len(st.session_state['selected_videos'])}개 선택됨")
 
@@ -223,21 +263,31 @@ def show_summary_page():
                         col1, col2 = st.columns([1, 4])
                         
                         with col1:
-                            st.image(vid["thumbnail_url"], width=120)
+                            try:
+                                st.image(vid["thumbnail_url"], width=120)
+                            except:
+                                st.write("🖼️ 썸네일")
                         
                         with col2:
                             st.markdown(f"**{vid['title']}**")
-                            st.caption(f"🕒 {vid['published_at'][:10]}")
+                            st.caption(f"🕒 {vid['published_at'][:10]} | ⏱️ {vid.get('duration_formatted', 'N/A')}")
                             
-                            # 체크박스
+                            # 체크박스 상태 동기화
+                            current_selected = vid["video_id"] in st.session_state["selected_videos"]
                             is_selected = st.checkbox(
-                                "선택", key=f"video_{vid['video_id']}"
+                                "선택", 
+                                value=current_selected,
+                                key=f"video_{vid['video_id']}"
                             )
                             
-                            if is_selected and vid["video_id"] not in st.session_state["selected_videos"]:
-                                st.session_state["selected_videos"].append(vid["video_id"])
-                            elif not is_selected and vid["video_id"] in st.session_state["selected_videos"]:
-                                st.session_state["selected_videos"].remove(vid["video_id"])
+                            # 상태 업데이트
+                            if is_selected != current_selected:
+                                if is_selected:
+                                    if vid["video_id"] not in st.session_state["selected_videos"]:
+                                        st.session_state["selected_videos"].append(vid["video_id"])
+                                else:
+                                    if vid["video_id"] in st.session_state["selected_videos"]:
+                                        st.session_state["selected_videos"].remove(vid["video_id"])
                     
                     if i < len(st.session_state["video_list"]) - 1:
                         st.divider()
@@ -250,8 +300,12 @@ def show_summary_page():
                     col1, col2 = st.columns(2)
                     with col1:
                         st.success(f"✅ {len(st.session_state['selected_videos'])}개 영상 선택됨")
+                    with col2:
+                        if st.session_state.get("processing_complete"):
+                            st.success("🎉 처리 완료!")
                     
                     if st.button("🧠 선택한 영상 요약 시작", type="primary"):
+                        st.session_state["processing_complete"] = False
                         process_summaries()
 
 def show_search_page():
@@ -261,11 +315,17 @@ def show_search_page():
     search_type = st.radio("검색 방법:", ["키워드 검색", "최근 요약 보기"])
     
     if search_type == "키워드 검색":
-        keyword = st.text_input("검색할 키워드를 입력하세요:", placeholder="예: 삼성전자, 반도체, 금리")
+        with st.form("keyword_search_form"):
+            keyword = st.text_input("검색할 키워드를 입력하세요:", placeholder="예: 삼성전자, 반도체, 금리")
+            search_submitted = st.form_submit_button("🔍 검색")
         
-        if st.button("🔍 검색") and keyword:
+        if search_submitted and keyword:
             with st.spinner("검색 중..."):
-                results = search_summaries_by_keyword(keyword)
+                try:
+                    results = search_summaries_by_keyword(keyword)
+                except Exception as e:
+                    st.error(f"검색 중 오류 발생: {e}")
+                    results = []
                 
             if not results:
                 st.warning("검색 결과가 없습니다.")
@@ -281,15 +341,21 @@ def show_search_page():
                             st.write(f"**감성:** {result['sentiment']}")
                             st.write(f"**요약 일시:** {result['created_time'][:10]}")
                         with col2:
-                            st.link_button("📝 Notion에서 보기", result['notion_url'])
-                            st.link_button("🎬 YouTube에서 보기", f"https://youtube.com/watch?v={result['video_id']}")
+                            if result.get('notion_url'):
+                                st.link_button("📝 Notion에서 보기", result['notion_url'])
+                            if result.get('video_id'):
+                                st.link_button("🎬 YouTube에서 보기", f"https://youtube.com/watch?v={result['video_id']}")
     
     else:  # 최근 요약 보기
         days = st.selectbox("기간 선택:", [7, 14, 30], format_func=lambda x: f"최근 {x}일")
         
         if st.button("📂 최근 요약 불러오기"):
             with st.spinner("불러오는 중..."):
-                results = get_recent_summaries(days)
+                try:
+                    results = get_recent_summaries(days)
+                except Exception as e:
+                    st.error(f"불러오기 중 오류 발생: {e}")
+                    results = []
             
             if not results:
                 st.warning("해당 기간의 요약이 없습니다.")
@@ -305,14 +371,19 @@ def show_search_page():
                             st.write(f"**감성:** {result['sentiment']}")
                             st.write(f"**요약 일시:** {result['created_time'][:10]}")
                         with col2:
-                            st.link_button("📝 Notion에서 보기", result['notion_url'])
+                            if result.get('notion_url'):
+                                st.link_button("📝 Notion에서 보기", result['notion_url'])
 
 def show_dashboard_page():
     st.header("📊 요약 대시보드")
     
     # 통계 불러오기
     with st.spinner("통계 불러오는 중..."):
-        stats = get_database_stats()
+        try:
+            stats = get_database_stats()
+        except Exception as e:
+            st.error(f"통계 불러오기 실패: {e}")
+            stats = {"total_summaries": 0, "sentiment_distribution": {}, "top_channels": []}
     
     # 전체 통계
     col1, col2, col3, col4 = st.columns(4)
@@ -336,8 +407,12 @@ def show_dashboard_page():
     with col1:
         st.subheader("📈 감성 분포")
         if stats["sentiment_distribution"]:
-            sentiment_data = list(stats["sentiment_distribution"].items())
-            st.bar_chart({item[0]: item[1] for item in sentiment_data})
+            import pandas as pd
+            sentiment_df = pd.DataFrame(
+                list(stats["sentiment_distribution"].items()),
+                columns=['감성', '개수']
+            )
+            st.bar_chart(sentiment_df.set_index('감성'))
         else:
             st.info("데이터가 없습니다.")
     
@@ -354,6 +429,22 @@ def show_settings_page():
     
     st.subheader("🔑 API 키 설정")
     st.info("환경변수 파일(.env)에서 API 키를 설정해주세요.")
+    
+    # API 키 상태 확인
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    api_status = {
+        "YouTube API": "✅" if os.getenv("YOUTUBE_API_KEY") else "❌",
+        "Gemini API": "✅" if os.getenv("GEMINI_API_KEY") else "❌",
+        "Notion Token": "✅" if os.getenv("NOTION_TOKEN") else "❌",
+        "Notion Database ID": "✅" if os.getenv("NOTION_DATABASE_ID") else "❌"
+    }
+    
+    st.subheader("📋 API 키 상태")
+    for api_name, status in api_status.items():
+        st.write(f"{status} {api_name}")
     
     with st.expander("📋 필요한 환경변수 목록"):
         st.code("""
@@ -373,14 +464,36 @@ NOTION_DATABASE_ID=your_database_id
         st.markdown("""
         1. Notion에서 새 데이터베이스 생성
         2. 다음 속성들을 추가:
-           - 제목 (Title)
-           - 채널 (Text)
-           - Video ID (Text)  
-           - 키워드 (Multi-select)
-           - 감성 (Select: 긍정적, 중립적, 부정적)
-           - 요약 일시 (Date)
-           - YouTube URL (URL)
+           - **제목** (Title)
+           - **채널** (Text)
+           - **Video ID** (Text)  
+           - **키워드** (Multi-select)
+           - **감성** (Select: 긍정적, 중립적, 부정적)
+           - **요약 일시** (Date)
+           - **YouTube URL** (URL)
         3. 데이터베이스 ID를 .env 파일에 추가
+        4. Notion 통합(Integration)을 생성하고 데이터베이스에 연결
+        """)
+    
+    with st.expander("🔧 문제 해결"):
+        st.markdown("""
+        **자주 발생하는 문제:**
+        
+        1. **채널 검색이 안 될 때**
+           - YouTube API 키 확인
+           - API 할당량 확인
+        
+        2. **자막 수집 실패**
+           - 영상에 자막이 없는 경우
+           - faster-whisper 설치 확인
+        
+        3. **요약 실패**
+           - Gemini API 키 확인
+           - 자막 길이가 너무 짧은 경우
+        
+        4. **Notion 저장 실패**
+           - Notion Token 및 Database ID 확인
+           - 데이터베이스 속성 설정 확인
         """)
 
 if __name__ == "__main__":
