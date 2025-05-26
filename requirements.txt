@@ -1,9 +1,23 @@
+
 streamlit
 google-api-python-client
 python-dotenv
-notion-client               # Notion 저장 기능
-yt-dlp                      # 영상/자막 다운로드용
-pytube                      # 영상/자막 다운로드용
-whisper                     # 자막 없을 때 STT
+notion-client
+yt-dlp
+google-generativeai
+requests
+torch==2.1.0
+faster-whisper
+
+
+#streamlit
+#google-api-python-client
+#python-dotenv
+#notion-client               # Notion 저장 기능
+#yt-dlp                      # 영상/자막 다운로드용
+#openai-whisper              # 자막 없을 때 STT
+#google-generativeai         # Gemini API
+#requests                    # HTTP 요청용
+#ffmpeg-python               # 오디오 처리용
 
 #streamlit run main.py
