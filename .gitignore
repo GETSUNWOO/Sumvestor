@@ -1,0 +1,34 @@
+# 가상환경
+venv/
+ENV/
+env/
+.venv/
+
+# Python 관련
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+*.db
+*.egg-info/
+.DS_Store
+
+# 환경설정 파일
+.env
+.env.*
+
+# Streamlit 설정
+.streamlit/config.toml
+
+# IDE 관련
+.vscode/
+.idea/
+
+# Jupyter 노트북 체크포인트
+.ipynb_checkpoints/
+
+# 기타
+*.bak
+*.swp

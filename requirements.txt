@@ -1,0 +1,9 @@
+streamlit
+google-api-python-client
+python-dotenv
+notion-client               # Notion 저장 기능
+yt-dlp                      # 영상/자막 다운로드용
+pytube                      # 영상/자막 다운로드용
+whisper                     # 자막 없을 때 STT
+
+#streamlit run main.py
