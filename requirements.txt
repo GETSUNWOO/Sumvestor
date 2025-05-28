@@ -13,8 +13,8 @@ requests>=2.31.0
 # AI & ML Libraries
 # ========================
 # PyTorch (CPU 버전 - 메모리 절약)
-torch>=2.1.0
-torchaudio>=2.1.0
+torch>=2.1.0,<3.0.0
+torchaudio>=2.1.0,<3.0.0
 
 # STT (Speech-to-Text)
 faster-whisper>=1.0.1

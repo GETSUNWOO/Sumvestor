@@ -42,7 +42,7 @@ class GoogleSTT(CloudSTT):
     
     def transcribe(self, video_url: str) -> 'STTResult':
         """Google STT 처리"""
-        from stt_engine import STTResult, STTProvider
+        from safe_stt_engine import STTResult, STTProvider
         
         try:
             # 오디오 추출 및 변환
@@ -188,7 +188,7 @@ class OpenAISTT(CloudSTT):
     
     def transcribe(self, video_url: str) -> 'STTResult':
         """OpenAI Whisper API 처리"""
-        from stt_engine import STTResult, STTProvider
+        from safe_stt_engine import STTResult, STTProvider
         
         try:
             # 오디오 추출

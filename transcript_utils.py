@@ -1,12 +1,12 @@
-# transcript_utils.py - 안전한 STT 엔진 연동 버전
+# transcript_utils.py - 안전한 STT 엔진 연동 버전 (수정된 import)
 import yt_dlp
 import os
 import requests
 import re
 import gc
-from typing import Optional
+from typing import Optional, Tuple
 
-# 안전한 STT 엔진 import
+# 안전한 STT 엔진 import (수정된 경로)
 from safe_stt_engine import get_safe_stt_engine, STTConfig, STTProvider
 from memory_manager import memory_manager, memory_monitor_decorator
 
@@ -29,7 +29,7 @@ def get_transcript(video_id: str, use_safe_stt: bool = True) -> Optional[str]:
     print(f"📝 YouTube 자막 수집 시도: {video_id}")
     transcript = extract_subtitles_with_ytdlp(video_url)
     
-    if transcript and len(transcript.strip()) > 50:
+    if transcript and len(transcript.strip()) > 100:
         print(f"✅ YouTube 자막 수집 성공: {len(transcript)}자")
         return clean_transcript(transcript)
     
@@ -38,13 +38,13 @@ def get_transcript(video_id: str, use_safe_stt: bool = True) -> Optional[str]:
         print(f"🎤 안전한 STT 엔진 사용: {video_id}")
         
         # 현재 설정된 STT 엔진 사용 (main.py에서 설정됨)
-        stt_engine = get_safe_stt_engine()
-        
-        # STT 처리 (비용 안전장치 포함)
         try:
+            stt_engine = get_safe_stt_engine()
+            
+            # STT 처리 (비용 안전장치 포함)
             stt_result = stt_engine.transcribe_video(video_url)
             
-            if stt_result.success and len(stt_result.text.strip()) > 50:
+            if stt_result.success and len(stt_result.text.strip()) > 100:
                 print(f"✅ 안전한 STT 성공 ({stt_result.provider.value}): {len(stt_result.text)}자")
                 
                 # 비용 발생 시 로그
@@ -75,7 +75,7 @@ def get_transcript_with_custom_stt(video_id: str, stt_config: STTConfig) -> Opti
     
     # 1. YouTube 자막 시도
     transcript = extract_subtitles_with_ytdlp(video_url)
-    if transcript and len(transcript.strip()) > 50:
+    if transcript and len(transcript.strip()) > 100:
         return clean_transcript(transcript)
     
     # 2. 사용자 정의 STT 설정으로 처리
@@ -313,7 +313,7 @@ def remove_repetitive_phrases(text: str) -> str:
     
     return text
 
-def get_transcript_with_fallback_strategy(video_id: str) -> tuple[Optional[str], str]:
+def get_transcript_with_fallback_strategy(video_id: str) -> Tuple[Optional[str], str]:
     """
     다양한 전략으로 자막을 수집하고 어떤 방법이 성공했는지 반환합니다.
     
@@ -377,9 +377,12 @@ def estimate_stt_cost(video_duration_minutes: float, provider: str = "google") -
     
     if provider == "google":
         # Google Cloud 무료 할당량 고려
-        stt_engine = get_safe_stt_engine()
-        cost_summary = stt_engine.get_cost_summary()
-        free_remaining = cost_summary['monthly']['google_free_remaining']
+        try:
+            stt_engine = get_safe_stt_engine()
+            cost_summary = stt_engine.get_cost_summary()
+            free_remaining = cost_summary['monthly']['google_free_remaining']
+        except:
+            free_remaining = 60  # 기본값
         
         billable_minutes = max(0, video_duration_minutes - free_remaining)
         cost = billable_minutes * cost_per_minute
@@ -420,3 +423,93 @@ def get_transcript_safe(video_id: str) -> Optional[str]:
 def get_transcript_free_only(video_id: str) -> Optional[str]:
     """완전 무료로만 자막을 가져오는 함수"""
     return get_transcript_local_only(video_id, "base")
+
+# 추가 유틸리티 함수들
+def validate_video_url(url: str) -> bool:
+    """YouTube URL 유효성 검사"""
+    youtube_patterns = [
+        r'(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([^&]+)',
+        r'(?:https?://)?(?:www\.)?youtu\.be/([^?]+)',
+        r'(?:https?://)?(?:www\.)?youtube\.com/embed/([^?]+)'
+    ]
+    
+    for pattern in youtube_patterns:
+        if re.match(pattern, url):
+            return True
+    return False
+
+def extract_video_id(url: str) -> Optional[str]:
+    """YouTube URL에서 비디오 ID 추출"""
+    patterns = [
+        r'(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([^&]+)',
+        r'(?:https?://)?(?:www\.)?youtu\.be/([^?]+)',
+        r'(?:https?://)?(?:www\.)?youtube\.com/embed/([^?]+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def get_video_info(video_url: str) -> Optional[dict]:
+    """YouTube 영상 정보 추출"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            
+            return {
+                'title': info.get('title', ''),
+                'duration': info.get('duration', 0),
+                'uploader': info.get('uploader', ''),
+                'upload_date': info.get('upload_date', ''),
+                'view_count': info.get('view_count', 0),
+                'like_count': info.get('like_count', 0),
+                'description': info.get('description', '')[:500],  # 처음 500자만
+                'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions'))
+            }
+    except Exception as e:
+        print(f"영상 정보 추출 실패: {e}")
+        return None
+
+def check_transcript_availability(video_url: str) -> dict:
+    """자막 사용 가능성 체크"""
+    try:
+        # YouTube 자막 체크
+        youtube_transcript = extract_subtitles_with_ytdlp(video_url)
+        youtube_available = bool(youtube_transcript and len(youtube_transcript.strip()) > 50)
+        
+        # STT 가능성 체크
+        stt_engine = get_safe_stt_engine()
+        stt_available = stt_engine.is_available(STTProvider.LOCAL)
+        
+        # 영상 정보
+        video_info = get_video_info(video_url)
+        duration_minutes = (video_info['duration'] / 60.0) if video_info else 0
+        
+        return {
+            'youtube_subtitles': youtube_available,
+            'local_stt_available': stt_available,
+            'duration_minutes': duration_minutes,
+            'recommended_method': (
+                'youtube_subtitles' if youtube_available 
+                else 'local_stt' if stt_available 
+                else 'unavailable'
+            ),
+            'estimated_processing_time': duration_minutes * 0.1 if stt_available else 0,  # 대략 10% 시간
+            'video_info': video_info
+        }
+    except Exception as e:
+        return {
+            'youtube_subtitles': False,
+            'local_stt_available': False,
+            'duration_minutes': 0,
+            'recommended_method': 'unavailable',
+            'estimated_processing_time': 0,
+            'error': str(e)
+        }

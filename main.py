@@ -3,23 +3,29 @@ import time
 import gc
 from datetime import datetime, timedelta, timezone
 
-# 모든 유틸리티 함수 import
+# 모든 유틸리티 함수 import (수정된 import 경로)
 try:
     from youtube_utils import search_channel, get_videos_from_channel
     from transcript_utils import get_transcript, clean_transcript
     from gemini_utils import summarize_transcript
     from notion_utils import save_summary_to_notion, search_summaries_by_keyword, get_recent_summaries, get_database_stats
     from memory_manager import memory_manager, memory_monitor_decorator, display_memory_info
+    
+    # 수정된 import 경로 (safe_stt_engine.py)
     from safe_stt_engine import (
         get_safe_stt_engine, cleanup_safe_stt_engine, reset_session_costs,
         STTConfig, STTProvider, SafetyLimits
     )
 except ImportError as e:
     st.error(f"모듈 import 오류: {e}")
+    st.info("누락된 모듈을 설치하거나 파일명을 확인하세요.")
     st.stop()
 
 # Streamlit 페이지 설정
-st.set_page_config(page_title="YouTube 요약 시스템 v2 (Safe)", layout="wide")
+st.set_page_config(
+    page_title="YouTube 요약 시스템 v2 (Safe)", 
+    layout="wide"
+)
 
 # 메모리 모니터링 시작
 if "memory_monitoring_started" not in st.session_state:
@@ -35,118 +41,137 @@ with st.sidebar:
     
     # STT 엔진 상태
     st.subheader("🎤 STT 엔진 상태")
-    stt_engine = get_safe_stt_engine()
-    stt_status = stt_engine.get_status()
-    
-    # STT 제공자 상태 표시
-    st.write("**사용 가능한 STT:**")
-    st.write(f"🤖 로컬 (Whisper): {'✅' if stt_status['providers']['local'] else '❌'}")
-    st.write(f"☁️ Google Cloud: {'✅' if stt_status['providers']['google'] else '❌'}")  
-    st.write(f"🌐 OpenAI API: {'✅' if stt_status['providers']['openai'] else '❌'}")
-    
-    # 비용 정보 표시
-    st.subheader("💰 비용 정보")
-    costs = stt_status['costs']
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("세션 비용", f"${costs['session']['cost']:.3f}")
-        st.metric("세션 사용", f"{costs['session']['minutes']:.1f}분")
-    with col2:
-        st.metric("월간 비용", f"${costs['monthly']['cost']:.2f}")
-        st.metric("Google 무료", f"{costs['monthly']['google_free_remaining']:.0f}분")
-    
-    # 비용 경고
-    if costs['session']['cost'] > 0.5:
-        st.warning(f"⚠️ 세션 비용 주의: ${costs['session']['cost']:.2f}")
-    
-    if costs['monthly']['cost'] > 5.0:
-        st.error(f"🚨 월간 비용 주의: ${costs['monthly']['cost']:.2f}")
+    try:
+        stt_engine = get_safe_stt_engine()
+        stt_status = stt_engine.get_status()
+        
+        # STT 제공자 상태 표시
+        st.write("**사용 가능한 STT:**")
+        st.write(f"🤖 로컬 (Whisper): {'✅' if stt_status['providers']['local'] else '❌'}")
+        st.write(f"☁️ Google Cloud: {'✅' if stt_status['providers']['google'] else '❌'}")  
+        st.write(f"🌐 OpenAI API: {'✅' if stt_status['providers']['openai'] else '❌'}")
+        
+        # 비용 정보 표시
+        st.subheader("💰 비용 정보")
+        costs = stt_status['costs']
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("세션 비용", f"${costs['session']['cost']:.3f}")
+            st.metric("세션 사용", f"{costs['session']['minutes']:.1f}분")
+        with col2:
+            st.metric("월간 비용", f"${costs['monthly']['cost']:.2f}")
+            st.metric("Google 무료", f"{costs['monthly']['google_free_remaining']:.0f}분")
+        
+        # 비용 경고
+        if costs['session']['cost'] > 0.5:
+            st.warning(f"⚠️ 세션 비용 주의: ${costs['session']['cost']:.2f}")
+        
+        if costs['monthly']['cost'] > 5.0:
+            st.error(f"🚨 월간 비용 주의: ${costs['monthly']['cost']:.2f}")
+        
+    except Exception as e:
+        st.error(f"STT 엔진 상태 확인 실패: {e}")
+        st.info("STT 환경 설정을 확인하세요.")
     
     # 비용 초기화 버튼
     if st.button("🔄 세션 비용 초기화"):
-        reset_session_costs()
-        st.success("세션 비용이 초기화되었습니다.")
-        st.rerun()
+        try:
+            reset_session_costs()
+            st.success("세션 비용이 초기화되었습니다.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"비용 초기화 실패: {e}")
     
     # STT 설정
     st.subheader("⚙️ STT 설정")
     
-    # Primary STT 선택
-    available_providers = []
-    if stt_status['providers']['local']:
-        available_providers.append("로컬 (Whisper) - 무료")
-    if stt_status['providers']['google']:
-        available_providers.append("Google Cloud - $0.006/분")
-    if stt_status['providers']['openai']:
-        available_providers.append("OpenAI API - $0.006/분")
-    
-    if available_providers:
-        primary_choice = st.selectbox(
-            "Primary STT", 
-            available_providers,
-            index=0,
-            help="로컬 STT가 가장 안전하고 무료입니다."
-        )
+    # STT 사용 가능성 체크
+    try:
+        stt_engine = get_safe_stt_engine()
+        stt_status = stt_engine.get_status()
         
-        # Fallback STT 선택
-        fallback_options = ["없음 (안전)"] + available_providers
-        fallback_choice = st.selectbox(
-            "Fallback STT",
-            fallback_options,
-            index=0,
-            help="Primary 실패시 사용할 백업 STT"
-        )
+        # Primary STT 선택
+        available_providers = []
+        if stt_status['providers']['local']:
+            available_providers.append("로컬 (Whisper) - 무료")
+        if stt_status['providers']['google']:
+            available_providers.append("Google Cloud - $0.006/분")
+        if stt_status['providers']['openai']:
+            available_providers.append("OpenAI API - $0.006/분")
         
-        # 자동 백업 설정
-        auto_fallback = st.checkbox(
-            "자동 백업 사용", 
-            value=False,
-            help="⚠️ 유료 STT로 자동 전환될 수 있습니다"
-        )
-        
-        if auto_fallback and "무료" not in fallback_choice:
-            st.warning("⚠️ 자동 백업이 유료 서비스로 설정되어 있습니다!")
-        
-        # STT 모델 크기 (로컬인 경우)
-        if "로컬" in primary_choice:
-            model_size = st.selectbox(
-                "Whisper 모델 크기",
-                ["tiny", "base", "small"],
-                index=1,
-                help="tiny: 빠름/낮은품질, base: 균형, small: 느림/높은품질"
+        if available_providers:
+            primary_choice = st.selectbox(
+                "Primary STT", 
+                available_providers,
+                index=0,
+                help="로컬 STT가 가장 안전하고 무료입니다."
             )
+            
+            # Fallback STT 선택
+            fallback_options = ["없음 (안전)"] + available_providers
+            fallback_choice = st.selectbox(
+                "Fallback STT",
+                fallback_options,
+                index=0,
+                help="Primary 실패시 사용할 백업 STT"
+            )
+            
+            # 자동 백업 설정
+            auto_fallback = st.checkbox(
+                "자동 백업 사용", 
+                value=False,
+                help="⚠️ 유료 STT로 자동 전환될 수 있습니다"
+            )
+            
+            if auto_fallback and "무료" not in fallback_choice:
+                st.warning("⚠️ 자동 백업이 유료 서비스로 설정되어 있습니다!")
+            
+            # STT 모델 크기 (로컬인 경우)
+            if "로컬" in primary_choice:
+                model_size = st.selectbox(
+                    "Whisper 모델 크기",
+                    ["tiny", "base", "small"],
+                    index=1,
+                    help="tiny: 빠름/낮은품질, base: 균형, small: 느림/높은품질"
+                )
+            else:
+                model_size = "base"
+            
+            # 비용 확인 설정
+            cost_confirmation = st.checkbox(
+                "비용 확인 필수", 
+                value=True,
+                help="유료 STT 사용 전 반드시 확인"
+            )
+            
+            # 안전 한도 설정
+            st.subheader("🛡️ 안전 한도")
+            session_limit = st.slider("세션 한도 ($)", 0.5, 5.0, 2.0, 0.5)
+            monthly_limit = st.slider("월간 한도 ($)", 5.0, 50.0, 10.0, 5.0)
+            
+            # STT 설정 세션에 저장
+            st.session_state["stt_config"] = {
+                "primary": primary_choice,
+                "fallback": fallback_choice,
+                "auto_fallback": auto_fallback,
+                "model_size": model_size,
+                "cost_confirmation": cost_confirmation,
+                "session_limit": session_limit,
+                "monthly_limit": monthly_limit
+            }
         else:
-            model_size = "base"
-        
-        # 비용 확인 설정
-        cost_confirmation = st.checkbox(
-            "비용 확인 필수", 
-            value=True,
-            help="유료 STT 사용 전 반드시 확인"
-        )
-        
-        # 안전 한도 설정
-        st.subheader("🛡️ 안전 한도")
-        session_limit = st.slider("세션 한도 ($)", 0.5, 5.0, 2.0, 0.5)
-        monthly_limit = st.slider("월간 한도 ($)", 5.0, 50.0, 10.0, 5.0)
-        
-        # STT 설정 세션에 저장
-        st.session_state["stt_config"] = {
-            "primary": primary_choice,
-            "fallback": fallback_choice,
-            "auto_fallback": auto_fallback,
-            "model_size": model_size,
-            "cost_confirmation": cost_confirmation,
-            "session_limit": session_limit,
-            "monthly_limit": monthly_limit
-        }
-    else:
-        st.error("사용 가능한 STT가 없습니다!")
-        st.info("test_stt.py를 실행하여 환경을 확인하세요.")
+            st.error("사용 가능한 STT가 없습니다!")
+            st.info("requirements.txt를 확인하고 필요한 라이브러리를 설치하세요.")
+            st.code("pip install faster-whisper yt-dlp")
+            
+    except Exception as e:
+        st.error(f"STT 설정 오류: {e}")
+        st.info("STT 환경을 확인하세요.")
 
 # 세션 상태 초기화
 def init_session_state():
+    """세션 상태 초기화"""
     defaults = {
         "selected_channel": None,
         "selected_channel_title": None,
@@ -211,6 +236,7 @@ def create_cost_confirmation_callback():
         
         # 버튼 클릭 전까지 대기
         st.stop()
+        return False
     
     return confirm_cost
 
@@ -303,7 +329,7 @@ def process_summaries():
             
             # 메모리 체크
             current_memory = memory_manager.get_memory_usage()["rss"]
-            if current_memory > 1000:
+            if current_memory > 3000:  # 3GB 제한
                 results_container.warning(f"⚠️ 메모리 부족으로 처리 중단: {video_title}")
                 memory_manager.force_cleanup(aggressive=True)
                 break
@@ -408,8 +434,9 @@ def process_summaries():
         memory_manager.force_cleanup(aggressive=True)
         memory_manager.cleanup_session_state(max_items=10)
 
-# 메인 실행 및 기타 페이지 함수들 (기존과 동일)
+# 메인 실행 함수
 def main():
+    """메인 실행 함수"""
     init_session_state()
     memory_manager.cleanup_session_state(max_items=20)
     
@@ -431,95 +458,6 @@ def main():
         show_cost_management_page()
     elif menu == "설정":
         show_settings_page()
-
-def show_cost_management_page():
-    """비용 관리 페이지"""
-    st.header("💰 비용 관리")
-    
-    stt_engine = get_safe_stt_engine()
-    cost_summary = stt_engine.get_cost_summary()
-    
-    # 비용 현황
-    st.subheader("📊 비용 현황")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("세션 비용", f"${cost_summary['session']['cost']:.3f}")
-    with col2:
-        st.metric("세션 사용량", f"{cost_summary['session']['minutes']:.1f}분")
-    with col3:
-        st.metric("월간 비용", f"${cost_summary['monthly']['cost']:.2f}")
-    with col4:
-        st.metric("월간 사용량", f"{cost_summary['monthly']['minutes']:.1f}분")
-    
-    # Google Cloud 무료 할당량
-    st.subheader("🆓 Google Cloud 무료 할당량")
-    free_remaining = cost_summary['monthly']['google_free_remaining']
-    free_used = 60 - free_remaining
-    
-    progress_value = free_used / 60
-    st.progress(progress_value)
-    st.write(f"사용: {free_used:.1f}분 / 60분 (남은 무료: {free_remaining:.1f}분)")
-    
-    if free_remaining < 10:
-        st.warning("⚠️ 무료 할당량이 부족합니다. 로컬 STT 사용을 권장합니다.")
-    
-    # 안전 한도 현황
-    st.subheader("🛡️ 안전 한도 현황")
-    limits = cost_summary['limits']
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        session_usage = cost_summary['session']['cost'] / limits['session_limit'] * 100
-        st.metric("세션 한도 사용률", f"{session_usage:.1f}%")
-        if session_usage > 80:
-            st.error("🚨 세션 한도 임박!")
-    
-    with col2:
-        monthly_usage = cost_summary['monthly']['cost'] / limits['monthly_limit'] * 100
-        st.metric("월간 한도 사용률", f"{monthly_usage:.1f}%")
-        if monthly_usage > 80:
-            st.error("🚨 월간 한도 임박!")
-    
-    # 비용 절약 팁
-    st.subheader("💡 비용 절약 팁")
-    with st.expander("📋 무료로 사용하는 방법"):
-        st.markdown("""
-        **완전 무료 사용법:**
-        1. Primary STT: "로컬 (Whisper)" 선택
-        2. Fallback STT: "없음 (안전)" 선택
-        3. 자동 백업: 비활성화
-        4. 비용 확인: 활성화 (안전장치)
-        
-        **하이브리드 사용법 (Google 무료 할당량 활용):**
-        1. Primary: "로컬 (Whisper)"
-        2. Fallback: "Google Cloud" (60분/월 무료)
-        3. 자동 백업: 활성화
-        4. 월 60분까지는 무료로 백업 STT 사용
-        
-        **주의사항:**
-        - 긴 영상(30분+)은 로컬 STT만 사용 권장
-        - 클라우드 STT는 자막 없는 영상에만 사용
-        - 정기적으로 무료 할당량 확인
-        """)
-    
-    # 비용 초기화
-    st.subheader("🔄 비용 초기화")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 세션 비용 초기화"):
-            reset_session_costs()
-            st.success("세션 비용이 초기화되었습니다.")
-            st.rerun()
-    
-    with col2:
-        if st.button("⚠️ 월간 비용 초기화", help="새 달이 시작되었을 때만 사용"):
-            if st.checkbox("월간 초기화 확인 (신중히!)"):
-                stt_engine.cost_tracker.reset_monthly()
-                stt_engine._save_cost_tracker()
-                st.success("월간 비용이 초기화되었습니다.")
-                st.rerun()
 
 def show_summary_page():
     """영상 요약하기 페이지 (기존 로직 + 비용 안내)"""
@@ -727,7 +665,7 @@ def show_summary_page():
                     current_memory = memory_manager.get_memory_usage()["rss"]
                     selected_count = len(st.session_state['selected_videos'])
                     
-                    if current_memory > 500:
+                    if current_memory > 1500:  # 1.5GB 제한
                         st.warning(f"⚠️ 현재 메모리: {current_memory:.0f}MB. 메모리 정리를 권장합니다.")
                         if st.button("🗑️ 메모리 정리 후 계속"):
                             memory_manager.force_cleanup(aggressive=True)
@@ -743,19 +681,197 @@ def show_summary_page():
                         st.session_state["processing_complete"] = False
                         process_summaries()
 
-# 기존 페이지 함수들 (검색, 대시보드, 설정)은 이전과 동일하므로 생략...
 def show_search_page():
-    """검색 페이지 (기존과 동일)"""
+    """검색 페이지"""
     st.header("🔍 요약 검색하기")
-    # ... 기존 검색 로직 유지
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        search_keyword = st.text_input("🔍 키워드 검색:", placeholder="예: 삼성전자, 부동산, AI")
+    with col2:
+        if st.button("검색", type="primary"):
+            if search_keyword:
+                with st.spinner("검색 중..."):
+                    try:
+                        results = search_summaries_by_keyword(search_keyword)
+                        st.session_state["search_results_data"] = results
+                    except Exception as e:
+                        st.error(f"검색 실패: {e}")
+                        st.session_state["search_results_data"] = []
+    
+    # 검색 결과 표시
+    if "search_results_data" in st.session_state and st.session_state["search_results_data"]:
+        results = st.session_state["search_results_data"]
+        st.subheader(f"🎯 검색 결과: {len(results)}개 발견")
+        
+        for i, result in enumerate(results):
+            with st.expander(f"📺 {result['title']}", expanded=(i < 3)):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"**채널:** {result['channel']}")
+                    st.markdown(f"**키워드:** {', '.join(result['keywords'])}")
+                    st.markdown(f"**감성:** {result['sentiment']}")
+                    st.markdown(f"**작성일:** {result['created_time'][:10]}")
+                with col2:
+                    if st.button("🔗 Notion에서 보기", key=f"notion_{i}"):
+                        st.markdown(f"[Notion 페이지 열기]({result['notion_url']})")
 
 def show_dashboard_page():
-    """대시보드 페이지 (기존과 동일)"""
+    """대시보드 페이지"""
     st.header("📊 요약 대시보드")
-    # ... 기존 대시보드 로직 유지
+    
+    try:
+        # 통계 데이터 가져오기
+        stats = get_database_stats()
+        
+        # 메트릭 표시
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("📝 총 요약 수", stats["total_summaries"])
+        with col2:
+            positive_count = stats["sentiment_distribution"].get("긍정적", 0)
+            st.metric("😊 긍정적", positive_count)
+        with col3:
+            neutral_count = stats["sentiment_distribution"].get("중립적", 0)
+            st.metric("😐 중립적", neutral_count)
+        with col4:
+            negative_count = stats["sentiment_distribution"].get("부정적", 0)
+            st.metric("😞 부정적", negative_count)
+        
+        # 감성 분포 차트
+        st.subheader("📈 감성 분포")
+        sentiment_data = stats["sentiment_distribution"]
+        if sentiment_data:
+            import matplotlib.pyplot as plt
+            
+            labels = list(sentiment_data.keys())
+            values = list(sentiment_data.values())
+            
+            fig, ax = plt.subplots()
+            ax.pie(values, labels=labels, autopct='%1.1f%%')
+            ax.set_title("감성 분포")
+            st.pyplot(fig)
+        
+        # 상위 채널 표시
+        st.subheader("🏆 상위 채널")
+        top_channels = stats["top_channels"]
+        if top_channels:
+            for i, (channel, count) in enumerate(top_channels[:5]):
+                st.write(f"{i+1}. **{channel}**: {count}개 요약")
+        
+        # 최근 요약 목록
+        st.subheader("🕒 최근 요약 (7일)")
+        recent_summaries = get_recent_summaries(7)
+        
+        if recent_summaries:
+            for summary in recent_summaries[:10]:
+                with st.expander(f"📺 {summary['title']}", expanded=False):
+                    st.write(f"**채널:** {summary['channel']}")
+                    st.write(f"**키워드:** {', '.join(summary['keywords'])}")
+                    st.write(f"**감성:** {summary['sentiment']}")
+                    st.write(f"**날짜:** {summary['created_time'][:10]}")
+        else:
+            st.info("최근 7일간 요약된 데이터가 없습니다.")
+            
+    except Exception as e:
+        st.error(f"대시보드 데이터 로드 실패: {e}")
+        st.info("Notion 연결을 확인하세요.")
+
+def show_cost_management_page():
+    """비용 관리 페이지"""
+    st.header("💰 비용 관리")
+    
+    try:
+        stt_engine = get_safe_stt_engine()
+        cost_summary = stt_engine.get_cost_summary()
+        
+        # 비용 현황
+        st.subheader("📊 비용 현황")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("세션 비용", f"${cost_summary['session']['cost']:.3f}")
+        with col2:
+            st.metric("세션 사용량", f"{cost_summary['session']['minutes']:.1f}분")
+        with col3:
+            st.metric("월간 비용", f"${cost_summary['monthly']['cost']:.2f}")
+        with col4:
+            st.metric("월간 사용량", f"{cost_summary['monthly']['minutes']:.1f}분")
+        
+        # Google Cloud 무료 할당량
+        st.subheader("🆓 Google Cloud 무료 할당량")
+        free_remaining = cost_summary['monthly']['google_free_remaining']
+        free_used = 60 - free_remaining
+        
+        progress_value = free_used / 60 if free_used >= 0 else 0
+        st.progress(progress_value)
+        st.write(f"사용: {free_used:.1f}분 / 60분 (남은 무료: {free_remaining:.1f}분)")
+        
+        if free_remaining < 10:
+            st.warning("⚠️ 무료 할당량이 부족합니다. 로컬 STT 사용을 권장합니다.")
+        
+        # 안전 한도 현황
+        st.subheader("🛡️ 안전 한도 현황")
+        limits = cost_summary['limits']
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            session_usage = cost_summary['session']['cost'] / limits['session_limit'] * 100
+            st.metric("세션 한도 사용률", f"{session_usage:.1f}%")
+            if session_usage > 80:
+                st.error("🚨 세션 한도 임박!")
+        
+        with col2:
+            monthly_usage = cost_summary['monthly']['cost'] / limits['monthly_limit'] * 100
+            st.metric("월간 한도 사용률", f"{monthly_usage:.1f}%")
+            if monthly_usage > 80:
+                st.error("🚨 월간 한도 임박!")
+        
+        # 비용 절약 팁
+        st.subheader("💡 비용 절약 팁")
+        with st.expander("📋 무료로 사용하는 방법"):
+            st.markdown("""
+            **완전 무료 사용법:**
+            1. Primary STT: "로컬 (Whisper)" 선택
+            2. Fallback STT: "없음 (안전)" 선택
+            3. 자동 백업: 비활성화
+            4. 비용 확인: 활성화 (안전장치)
+            
+            **하이브리드 사용법 (Google 무료 할당량 활용):**
+            1. Primary: "로컬 (Whisper)"
+            2. Fallback: "Google Cloud" (60분/월 무료)
+            3. 자동 백업: 활성화
+            4. 월 60분까지는 무료로 백업 STT 사용
+            
+            **주의사항:**
+            - 긴 영상(30분+)은 로컬 STT만 사용 권장
+            - 클라우드 STT는 자막 없는 영상에만 사용
+            - 정기적으로 무료 할당량 확인
+            """)
+        
+        # 비용 초기화
+        st.subheader("🔄 비용 초기화")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 세션 비용 초기화"):
+                reset_session_costs()
+                st.success("세션 비용이 초기화되었습니다.")
+                st.rerun()
+        
+        with col2:
+            if st.button("⚠️ 월간 비용 초기화", help="새 달이 시작되었을 때만 사용"):
+                if st.checkbox("월간 초기화 확인 (신중히!)"):
+                    stt_engine.cost_tracker.reset_monthly()
+                    stt_engine._save_cost_tracker()
+                    st.success("월간 비용이 초기화되었습니다.")
+                    st.rerun()
+                    
+    except Exception as e:
+        st.error(f"비용 관리 데이터 로드 실패: {e}")
 
 def show_stt_test_page():
-    """STT 테스트 페이지 (비용 안전장치 포함)"""
+    """STT 테스트 페이지"""
     st.header("🧪 STT 시스템 테스트")
     
     st.info("새로운 STT 시스템의 성능을 안전하게 테스트합니다.")
@@ -772,18 +888,6 @@ def show_stt_test_page():
             st.error("올바른 YouTube URL을 입력하세요.")
             return
         
-        # 영상 ID 추출
-        import re
-        if "youtu.be/" in test_url:
-            video_id = test_url.split("youtu.be/")[1].split("?")[0]
-        else:
-            match = re.search(r"v=([^&]+)", test_url)
-            if match:
-                video_id = match.group(1)
-            else:
-                st.error("영상 ID를 추출할 수 없습니다.")
-                return
-        
         # 안전한 테스트 설정 (로컬 우선)
         test_config = STTConfig(
             primary_provider=STTProvider.LOCAL,
@@ -798,61 +902,69 @@ def show_stt_test_page():
         with st.spinner("안전한 STT 테스트 실행 중..."):
             start_time = time.time()
             
-            stt_engine = get_safe_stt_engine(test_config)
-            result = stt_engine.transcribe_video(test_url)
-            
-            end_time = time.time()
-            processing_time = end_time - start_time
-        
-        # 결과 표시
-        if result.success:
-            st.success(f"✅ STT 성공! ({result.provider.value})")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("처리 시간", f"{processing_time:.1f}초")
-            with col2:
-                st.metric("텍스트 길이", f"{len(result.text)}자")
-            with col3:
-                if result.confidence:
-                    st.metric("신뢰도", f"{result.confidence:.2f}")
-            with col4:
-                st.metric("비용", f"${result.cost_incurred:.3f}")
-            
-            # 결과 텍스트 표시
-            st.subheader("📝 STT 결과:")
-            st.text_area("변환된 텍스트", result.text, height=300)
-            
-            # 청크 정보
-            if result.chunks_processed > 1:
-                st.info(f"📊 {result.chunks_processed}개 청크로 분할 처리됨")
-        else:
-            st.error(f"❌ STT 실패: {result.error_message}")
-            st.info("다른 STT 제공자를 시도해보거나 영상 길이를 확인하세요.")
+            try:
+                stt_engine = get_safe_stt_engine(test_config)
+                result = stt_engine.transcribe_video(test_url)
+                
+                end_time = time.time()
+                processing_time = end_time - start_time
+                
+                # 결과 표시
+                if result.success:
+                    st.success(f"✅ STT 성공! ({result.provider.value})")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("처리 시간", f"{processing_time:.1f}초")
+                    with col2:
+                        st.metric("텍스트 길이", f"{len(result.text)}자")
+                    with col3:
+                        if result.confidence:
+                            st.metric("신뢰도", f"{result.confidence:.2f}")
+                    with col4:
+                        st.metric("비용", f"${result.cost_incurred:.3f}")
+                    
+                    # 결과 텍스트 표시
+                    st.subheader("📝 STT 결과:")
+                    st.text_area("변환된 텍스트", result.text, height=300)
+                    
+                    # 청크 정보
+                    if result.chunks_processed > 1:
+                        st.info(f"📊 {result.chunks_processed}개 청크로 분할 처리됨")
+                else:
+                    st.error(f"❌ STT 실패: {result.error_message}")
+                    st.info("다른 STT 제공자를 시도해보거나 영상 길이를 확인하세요.")
+                    
+            except Exception as e:
+                st.error(f"테스트 실행 중 오류: {e}")
 
 def show_settings_page():
-    """설정 페이지 (비용 안전장치 추가)"""
+    """설정 페이지"""
     st.header("⚙️ 설정")
     
     # 비용 안전장치 상태
     st.subheader("🛡️ 비용 안전장치 상태")
-    stt_engine = get_safe_stt_engine()
-    status = stt_engine.get_status()
+    try:
+        stt_engine = get_safe_stt_engine()
+        status = stt_engine.get_status()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("**안전 설정:**")
+            st.write(f"✅ 비용 확인 필수: {status['config']['cost_confirmation']}")
+            st.write(f"✅ 자동 백업: {status['config']['auto_fallback']}")
+            st.write(f"✅ Primary STT: {status['config']['primary']}")
+        
+        with col2:
+            st.write("**안전 한도:**")
+            limits = status['costs']['limits']
+            st.write(f"세션 한도: ${limits['session_limit']}")
+            st.write(f"월간 한도: ${limits['monthly_limit']}")
+            
+    except Exception as e:
+        st.error(f"안전장치 상태 확인 실패: {e}")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("**안전 설정:**")
-        st.write(f"✅ 비용 확인 필수: {status['config']['cost_confirmation']}")
-        st.write(f"✅ 자동 백업: {status['config']['auto_fallback']}")
-        st.write(f"✅ Primary STT: {status['config']['primary']}")
-    
-    with col2:
-        st.write("**안전 한도:**")
-        limits = status['costs']['limits']
-        st.write(f"세션 한도: ${limits['session_limit']}")
-        st.write(f"월간 한도: ${limits['monthly_limit']}")
-    
-    # API 키 설정 (기존과 동일)
+    # API 키 설정
     st.subheader("🔑 API 키 설정")
     st.info("환경변수 파일(.env)에서 API 키를 설정해주세요.")
     
@@ -883,7 +995,7 @@ def show_settings_page():
             memory_manager.cleanup_session_state(max_items=10)
             cleanup_safe_stt_engine()
             
-            large_keys = ["video_list", "search_results"]
+            large_keys = ["video_list", "search_results", "search_results_data"]
             for key in large_keys:
                 if key in st.session_state:
                     st.session_state[key] = []
@@ -898,8 +1010,33 @@ def show_settings_page():
             st.rerun()
     
     with col3:
-        if st.button("🧪 STT 환경 진단"):
-            st.info("터미널에서 'python test_stt.py'를 실행하여 전체 진단을 수행하세요.")
+        if st.button("🧪 환경 진단"):
+            st.info("환경 진단을 실행합니다...")
+            
+            # 간단한 환경 진단
+            diagnostic_results = []
+            
+            # Python 라이브러리 체크
+            try:
+                import faster_whisper
+                diagnostic_results.append("✅ faster-whisper 설치됨")
+            except ImportError:
+                diagnostic_results.append("❌ faster-whisper 설치 필요")
+            
+            try:
+                import yt_dlp
+                diagnostic_results.append("✅ yt-dlp 설치됨")
+            except ImportError:
+                diagnostic_results.append("❌ yt-dlp 설치 필요")
+            
+            try:
+                import torch
+                diagnostic_results.append("✅ PyTorch 설치됨")
+            except ImportError:
+                diagnostic_results.append("❌ PyTorch 설치 필요")
+            
+            for result in diagnostic_results:
+                st.write(result)
     
     # 비용 안전 가이드
     st.subheader("💡 비용 안전 사용 가이드")
@@ -942,5 +1079,8 @@ def show_settings_page():
         """)
 
 if __name__ == "__main__":
-    main()
-        
+    try:
+        main()
+    except Exception as e:
+        st.error(f"애플리케이션 실행 중 오류: {e}")
+        st.info("페이지를 새로고침하거나 설정을 확인하세요.")

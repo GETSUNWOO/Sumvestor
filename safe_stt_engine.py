@@ -1,18 +1,34 @@
-# safe_stt_engine.py - 비용 안전장치 포함 STT 엔진
+# safe_stt_engine.py - 비용 안전장치 포함 STT 엔진 (파일명 수정됨)
 import os
 import tempfile
 import gc
 import time
 import json
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime, timedelta
 
-# 로컬 모듈
-from memory_manager import memory_manager, memory_monitor_decorator
+# 로컬 모듈 (순환 import 방지)
+try:
+    from memory_manager import memory_manager, memory_monitor_decorator
+except ImportError:
+    # memory_manager가 없어도 동작하도록 대체 구현
+    class DummyMemoryManager:
+        def get_memory_usage(self):
+            return {"rss": 0, "vms": 0, "percent": 0}
+        def check_memory_pressure(self, threshold_mb=2000):
+            return False
+        def force_cleanup(self, aggressive=False):
+            return 0
+    
+    memory_manager = DummyMemoryManager()
+    
+    def memory_monitor_decorator(func):
+        return func
 
 class STTProvider(Enum):
+    """STT 제공자 열거형"""
     LOCAL = "local"
     GOOGLE = "google" 
     OPENAI = "openai"
@@ -27,6 +43,7 @@ class CostInfo:
     
     @classmethod
     def get_cost_info(cls, provider: STTProvider) -> 'CostInfo':
+        """제공자별 비용 정보 반환"""
         cost_map = {
             STTProvider.LOCAL: cls(provider, 0.0, 0, 0),  # 완전 무료
             STTProvider.GOOGLE: cls(provider, 0.006, 60, 1000),  # $0.006/분, 60분 무료, 1GB 제한
@@ -36,7 +53,7 @@ class CostInfo:
 
 @dataclass
 class CostTracker:
-    """비용 추적 클래스"""
+    """비용 추적 클래스 (JSON 직렬화 가능)"""
     session_cost: float = 0.0
     session_minutes: float = 0.0
     monthly_cost: float = 0.0
@@ -65,6 +82,21 @@ class CostTracker:
         """월간 리셋 필요 여부"""
         current_month = datetime.now().strftime("%Y-%m")
         return self.last_reset != current_month
+    
+    def to_dict(self) -> dict:
+        """딕셔너리로 변환 (JSON 저장용)"""
+        return {
+            'session_cost': self.session_cost,
+            'session_minutes': self.session_minutes,
+            'monthly_cost': self.monthly_cost,
+            'monthly_minutes': self.monthly_minutes,
+            'last_reset': self.last_reset
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'CostTracker':
+        """딕셔너리에서 생성"""
+        return cls(**data)
 
 @dataclass
 class SafetyLimits:
@@ -85,7 +117,7 @@ class STTConfig:
     whisper_model_size: str = "base"
     enable_chunking: bool = True
     auto_fallback: bool = False
-    safety_limits: SafetyLimits = field(default_factory=SafetyLimits)  # 이 줄 수정
+    safety_limits: SafetyLimits = field(default_factory=SafetyLimits)
     cost_confirmation_required: bool = True
 
 @dataclass
@@ -102,37 +134,39 @@ class STTResult:
     processing_minutes: float = 0.0  # 처리된 분수
 
 class SafeSTTEngine:
-    """비용 안전장치 포함 STT 엔진"""
+    """비용 안전장치 포함 STT 엔진 (메인 클래스)"""
     
     def __init__(self, config: STTConfig = None):
         self.config = config or STTConfig()
         self._local_stt = None
-        self._cloud_stt = None
+        self._cloud_stt = {}  # 딕셔너리로 변경하여 provider별 관리
         self.cost_tracker = self._load_cost_tracker()
         
         # 월간 리셋 체크
         if self.cost_tracker.should_reset_monthly():
             self.cost_tracker.reset_monthly()
             self._save_cost_tracker()
+        
+        print(f"✅ SafeSTTEngine 초기화 완료 (Primary: {self.config.primary_provider.value})")
     
     def _load_cost_tracker(self) -> CostTracker:
         """비용 추적 데이터 로드"""
         try:
             tracker_file = "cost_tracker.json"
             if os.path.exists(tracker_file):
-                with open(tracker_file, 'r') as f:
+                with open(tracker_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    return CostTracker(**data)
-        except:
-            pass
+                    return CostTracker.from_dict(data)
+        except Exception as e:
+            print(f"비용 추적 데이터 로드 실패: {e}")
         return CostTracker()
     
     def _save_cost_tracker(self):
         """비용 추적 데이터 저장"""
         try:
             tracker_file = "cost_tracker.json"
-            with open(tracker_file, 'w') as f:
-                json.dump(self.cost_tracker.__dict__, f)
+            with open(tracker_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cost_tracker.to_dict(), f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"비용 추적 데이터 저장 실패: {e}")
     
@@ -143,9 +177,10 @@ class SafeSTTEngine:
         if provider == STTProvider.LOCAL:
             return {
                 "cost": 0.0,
-                "free_tier_remaining": 0,
+                "free_tier_remaining": float('inf'),  # 무제한
                 "will_exceed_free": False,
-                "estimated_total": 0.0
+                "estimated_total": self.cost_tracker.session_cost,
+                "billable_minutes": 0.0
             }
         
         # Google Cloud 무료 할당량 계산
@@ -201,15 +236,9 @@ class SafeSTTEngine:
             "cost_estimate": cost_estimate
         }
     
-    def get_user_confirmation(self, safety_check: Dict, provider: STTProvider) -> bool:
-        """사용자 확인 (Streamlit에서 구현되어야 함)"""
-        # 이 함수는 실제로 Streamlit UI에서 구현됨
-        # 여기서는 기본적으로 안전하지 않으면 False 반환
-        return safety_check["safe"]
-    
     @memory_monitor_decorator
-    def transcribe_video(self, video_url: str, user_confirmation_callback=None) -> STTResult:
-        """안전한 영상 STT 처리"""
+    def transcribe_video(self, video_url: str, user_confirmation_callback: Optional[Callable] = None) -> STTResult:
+        """안전한 영상 STT 처리 (메인 메서드)"""
         print(f"🎤 안전한 STT 처리 시작: {video_url}")
         
         # 메모리 체크
@@ -222,17 +251,20 @@ class SafeSTTEngine:
                 error_message="메모리 부족으로 STT 처리 불가"
             )
         
-        # 영상 길이 추정 (정확하지 않을 수 있음)
+        # 영상 길이 추정
         estimated_duration = self._estimate_video_duration(video_url)
+        print(f"📊 예상 영상 길이: {estimated_duration:.1f}분")
         
         # 1차: Primary provider 안전성 체크
         primary_safety = self.check_safety_limits(estimated_duration, self.config.primary_provider)
         
-        if not primary_safety["safe"] and self.config.primary_provider != STTProvider.LOCAL:
-            print(f"⚠️ Primary STT ({self.config.primary_provider.value}) 안전하지 않음: {primary_safety['blocks']}")
+        if not primary_safety["safe"]:
+            print(f"⚠️ Primary STT ({self.config.primary_provider.value}) 안전하지 않음")
+            for block in primary_safety['blocks']:
+                print(f"  - {block}")
             
-            # 로컬 STT로 폴백 (항상 안전)
-            if self.config.fallback_provider == STTProvider.LOCAL or self.config.primary_provider != STTProvider.LOCAL:
+            # 로컬 STT로 강제 폴백 (항상 안전)
+            if self.config.primary_provider != STTProvider.LOCAL:
                 print("🔄 로컬 STT로 안전 폴백")
                 return self._try_transcription(video_url, STTProvider.LOCAL)
             else:
@@ -250,16 +282,20 @@ class SafeSTTEngine:
             primary_safety["cost_estimate"]["cost"] > 0):
             
             if user_confirmation_callback:
-                confirmed = user_confirmation_callback(primary_safety, self.config.primary_provider)
-                if not confirmed:
-                    print("❌ 사용자가 비용 발생을 거부함")
-                    return STTResult(
-                        success=False,
-                        text="",
-                        provider=self.config.primary_provider,
-                        duration_seconds=0,
-                        error_message="사용자가 비용 발생을 거부함"
-                    )
+                try:
+                    confirmed = user_confirmation_callback(primary_safety, self.config.primary_provider)
+                    if not confirmed:
+                        print("❌ 사용자가 비용 발생을 거부함")
+                        return STTResult(
+                            success=False,
+                            text="",
+                            provider=self.config.primary_provider,
+                            duration_seconds=0,
+                            error_message="사용자가 비용 발생을 거부함"
+                        )
+                except Exception as e:
+                    print(f"⚠️ 사용자 확인 콜백 실패: {e}, 로컬 STT로 폴백")
+                    return self._try_transcription(video_url, STTProvider.LOCAL)
             else:
                 # 콜백이 없으면 로컬로 폴백
                 print("🔄 비용 확인 불가로 로컬 STT 사용")
@@ -268,26 +304,28 @@ class SafeSTTEngine:
         # Primary provider 시도
         result = self._try_transcription(video_url, self.config.primary_provider)
         
-        # Fallback 시도 (안전한 경우에만)
+        # Fallback 시도 (필요한 경우)
         if (not result.success and 
             self.config.auto_fallback and 
             self.config.fallback_provider and
             self.config.fallback_provider != self.config.primary_provider):
             
+            print(f"🔄 Fallback STT 시도: {self.config.fallback_provider.value}")
+            
             fallback_safety = self.check_safety_limits(estimated_duration, self.config.fallback_provider)
             
             if fallback_safety["safe"] or self.config.fallback_provider == STTProvider.LOCAL:
-                print(f"🔄 안전한 Fallback STT 시도: {self.config.fallback_provider.value}")
-                
                 # 비용 확인 (fallback도 유료인 경우)
                 if (self.config.fallback_provider != STTProvider.LOCAL and
-                    fallback_safety["cost_estimate"]["cost"] > 0):
+                    fallback_safety["cost_estimate"]["cost"] > 0 and
+                    user_confirmation_callback):
                     
-                    if user_confirmation_callback:
+                    try:
                         confirmed = user_confirmation_callback(fallback_safety, self.config.fallback_provider)
                         if confirmed:
                             result = self._try_transcription(video_url, self.config.fallback_provider)
-                    # 확인 불가시 fallback 건너뛰기
+                    except Exception as e:
+                        print(f"Fallback 확인 실패: {e}")
                 else:
                     result = self._try_transcription(video_url, self.config.fallback_provider)
         
@@ -316,7 +354,7 @@ class SafeSTTEngine:
                 return duration_seconds / 60.0 if duration_seconds else 30.0  # 기본값 30분
                 
         except Exception as e:
-            print(f"영상 길이 추정 실패: {e}")
+            print(f"⚠️ 영상 길이 추정 실패: {e}")
             return 30.0  # 안전한 기본값
     
     def _try_transcription(self, video_url: str, provider: STTProvider) -> STTResult:
@@ -327,7 +365,7 @@ class SafeSTTEngine:
                 text="",
                 provider=provider,
                 duration_seconds=0,
-                error_message=f"{provider.value} STT 사용 불가"
+                error_message=f"{provider.value} STT 사용 불가 (환경 설정 확인 필요)"
             )
         
         try:
@@ -371,40 +409,70 @@ class SafeSTTEngine:
                 success=False,
                 text="",
                 provider=provider,
-                duration_seconds=time.time() - start_time,
+                duration_seconds=time.time() - start_time if 'start_time' in locals() else 0,
                 error_message=str(e)
             )
     
     def _transcribe_local(self, video_url: str) -> STTResult:
         """로컬 faster-whisper STT"""
-        from local_stt import LocalSTT
-        
-        if self._local_stt is None:
-            self._local_stt = LocalSTT(
-                model_size=self.config.whisper_model_size,
-                enable_chunking=self.config.enable_chunking,
-                chunk_duration=self.config.chunk_duration_seconds
+        try:
+            from local_stt import LocalSTT
+            
+            if self._local_stt is None:
+                self._local_stt = LocalSTT(
+                    model_size=self.config.whisper_model_size,
+                    enable_chunking=self.config.enable_chunking,
+                    chunk_duration=self.config.chunk_duration_seconds
+                )
+            
+            return self._local_stt.transcribe(video_url)
+            
+        except ImportError as e:
+            return STTResult(
+                success=False,
+                text="",
+                provider=STTProvider.LOCAL,
+                duration_seconds=0,
+                error_message=f"로컬 STT 모듈 로드 실패: {e}"
             )
-        
-        return self._local_stt.transcribe(video_url)
     
     def _transcribe_google(self, video_url: str) -> STTResult:
         """Google Cloud STT"""
-        from cloud_stt import GoogleSTT
-        
-        if self._cloud_stt is None:
-            self._cloud_stt = GoogleSTT()
-        
-        return self._cloud_stt.transcribe(video_url)
+        try:
+            from cloud_stt import GoogleSTT
+            
+            if STTProvider.GOOGLE not in self._cloud_stt:
+                self._cloud_stt[STTProvider.GOOGLE] = GoogleSTT()
+            
+            return self._cloud_stt[STTProvider.GOOGLE].transcribe(video_url)
+            
+        except ImportError as e:
+            return STTResult(
+                success=False,
+                text="",
+                provider=STTProvider.GOOGLE,
+                duration_seconds=0,
+                error_message=f"Google STT 모듈 로드 실패: {e}"
+            )
     
     def _transcribe_openai(self, video_url: str) -> STTResult:
         """OpenAI Whisper API STT"""
-        from cloud_stt import OpenAISTT
-        
-        if self._cloud_stt is None:
-            self._cloud_stt = OpenAISTT()
-        
-        return self._cloud_stt.transcribe(video_url)
+        try:
+            from cloud_stt import OpenAISTT
+            
+            if STTProvider.OPENAI not in self._cloud_stt:
+                self._cloud_stt[STTProvider.OPENAI] = OpenAISTT()
+            
+            return self._cloud_stt[STTProvider.OPENAI].transcribe(video_url)
+            
+        except ImportError as e:
+            return STTResult(
+                success=False,
+                text="",
+                provider=STTProvider.OPENAI,
+                duration_seconds=0,
+                error_message=f"OpenAI STT 모듈 로드 실패: {e}"
+            )
     
     def is_available(self, provider: STTProvider) -> bool:
         """STT 제공자 사용 가능 여부 확인"""
@@ -420,6 +488,7 @@ class SafeSTTEngine:
         """로컬 STT 사용 가능 여부"""
         try:
             import faster_whisper
+            import yt_dlp
             return True
         except ImportError:
             return False
@@ -459,18 +528,6 @@ class SafeSTTEngine:
             }
         }
     
-    def cleanup(self):
-        """리소스 정리"""
-        if self._local_stt:
-            self._local_stt.cleanup()
-            self._local_stt = None
-        
-        if self._cloud_stt:
-            self._cloud_stt.cleanup()
-            self._cloud_stt = None
-        
-        memory_manager.force_cleanup(aggressive=True)
-    
     def get_status(self) -> Dict:
         """STT 엔진 상태 정보"""
         return {
@@ -490,15 +547,42 @@ class SafeSTTEngine:
             "costs": self.get_cost_summary(),
             "memory": memory_manager.get_memory_usage()
         }
+    
+    def cleanup(self):
+        """리소스 정리"""
+        print("🗑️ SafeSTTEngine 리소스 정리 중...")
+        
+        if self._local_stt:
+            try:
+                self._local_stt.cleanup()
+            except:
+                pass
+            self._local_stt = None
+        
+        for provider, stt_instance in self._cloud_stt.items():
+            try:
+                stt_instance.cleanup()
+            except:
+                pass
+        self._cloud_stt.clear()
+        
+        # 최종 비용 데이터 저장
+        self._save_cost_tracker()
+        
+        memory_manager.force_cleanup(aggressive=True)
+        print("✅ SafeSTTEngine 정리 완료")
 
-# 전역 STT 엔진 인스턴스
+# 전역 STT 엔진 인스턴스 (싱글톤 패턴)
 _safe_stt_engine = None
 
 def get_safe_stt_engine(config: STTConfig = None) -> SafeSTTEngine:
     """안전한 STT 엔진 싱글톤 인스턴스"""
     global _safe_stt_engine
     
-    if _safe_stt_engine is None:
+    if _safe_stt_engine is None or (config is not None):
+        # 새 설정이 제공되거나 처음 생성시
+        if _safe_stt_engine is not None:
+            _safe_stt_engine.cleanup()
         _safe_stt_engine = SafeSTTEngine(config)
     
     return _safe_stt_engine
@@ -518,7 +602,13 @@ def reset_session_costs():
     if _safe_stt_engine:
         _safe_stt_engine.cost_tracker.reset_session()
         _safe_stt_engine._save_cost_tracker()
+        print("🔄 세션 비용 초기화 완료")
 
 # 프로그램 종료시 자동 정리
 import atexit
-atexit.register(cleanup_safe_stt_engine)
+
+def _cleanup_on_exit():
+    """프로그램 종료시 정리"""
+    cleanup_safe_stt_engine()
+
+atexit.register(_cleanup_on_exit)
