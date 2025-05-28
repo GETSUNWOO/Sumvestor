@@ -5,7 +5,7 @@ import gc
 import time
 import json
 from typing import Optional, Dict, List, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime, timedelta
 
@@ -79,14 +79,14 @@ class SafetyLimits:
 class STTConfig:
     """STT 설정 클래스 (안전장치 포함)"""
     primary_provider: STTProvider = STTProvider.LOCAL
-    fallback_provider: Optional[STTProvider] = None  # 기본값 None (안전)
+    fallback_provider: Optional[STTProvider] = None
     max_duration_seconds: int = 3600
     chunk_duration_seconds: int = 600
     whisper_model_size: str = "base"
     enable_chunking: bool = True
-    auto_fallback: bool = False  # 기본값 False (안전)
-    safety_limits: SafetyLimits = SafetyLimits()
-    cost_confirmation_required: bool = True  # 비용 확인 필수
+    auto_fallback: bool = False
+    safety_limits: SafetyLimits = field(default_factory=SafetyLimits)  # 이 줄 수정
+    cost_confirmation_required: bool = True
 
 @dataclass
 class STTResult:
