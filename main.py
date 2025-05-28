@@ -1,6 +1,7 @@
 import streamlit as st
 import time
-from datetime import datetime, timedelta
+import gc
+from datetime import datetime, timedelta, timezone
 
 # 모든 유틸리티 함수 import
 try:
@@ -8,33 +9,55 @@ try:
     from transcript_utils import get_transcript, clean_transcript
     from gemini_utils import summarize_transcript
     from notion_utils import save_summary_to_notion, search_summaries_by_keyword, get_recent_summaries, get_database_stats
+    from memory_manager import memory_manager, whisper_manager, memory_monitor_decorator, display_memory_info
 except ImportError as e:
     st.error(f"모듈 import 오류: {e}")
     st.stop()
 
 # Streamlit 페이지 설정
 st.set_page_config(page_title="YouTube 요약 시스템", layout="wide")
+
+# 메모리 모니터링 시작
+if "memory_monitoring_started" not in st.session_state:
+    memory_manager.start_monitoring(interval=10.0)  # 10초마다 체크
+    st.session_state["memory_monitoring_started"] = True
+
 st.title("📺 유튜브 요약 시스템 MVP")
+
+# 메모리 정보 표시 (사이드바)
+with st.sidebar:
+    st.subheader("🖥️ 시스템 상태")
+    display_memory_info()
+    
+    # Whisper 모델 상태
+    if whisper_manager.is_loaded():
+        model_info = whisper_manager.get_model_info()
+        st.success(f"🤖 Whisper 모델: {model_info['size']}")
+        if st.button("🗑️ 모델 해제"):
+            whisper_manager.clear_model()
+            st.rerun()
+    else:
+        st.info("🤖 Whisper 모델: 미로딩")
 
 # 세션 상태 초기화
 def init_session_state():
-    if "selected_channel" not in st.session_state:
-        st.session_state["selected_channel"] = None
-        st.session_state["selected_channel_title"] = None
-    if "video_list" not in st.session_state:
-        st.session_state["video_list"] = []
-    if "selected_videos" not in st.session_state:
-        st.session_state["selected_videos"] = []
-    if "video_list_loaded" not in st.session_state:
-        st.session_state["video_list_loaded"] = False
-    if "search_results" not in st.session_state:
-        st.session_state["search_results"] = []
-    if "processing_complete" not in st.session_state:
-        st.session_state["processing_complete"] = False
+    defaults = {
+        "selected_channel": None,
+        "selected_channel_title": None,
+        "video_list": [],
+        "selected_videos": [],
+        "video_list_loaded": False,
+        "search_results": [],
+        "processing_complete": False
+    }
+    
+    for key, default_value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = default_value
 
-# 요약 처리 함수
+@memory_monitor_decorator
 def process_summaries():
-    """선택된 영상들을 요약 처리합니다."""
+    """선택된 영상들을 요약 처리합니다. (메모리 누수 핫픽스 버전)"""
     if not st.session_state["selected_videos"]:
         st.error("선택된 영상이 없습니다.")
         return
@@ -55,75 +78,155 @@ def process_summaries():
     total_videos = len(selected_video_info)
     success_count = 0
     
-    for i, video_info in enumerate(selected_video_info):
-        video_id = video_info["video_id"]
-        video_title = video_info["title"]
-        
-        # 진행률 업데이트
-        progress = (i + 1) / total_videos
-        progress_bar.progress(progress)
-        status_text.text(f"처리 중... ({i + 1}/{total_videos}): {video_title[:50]}...")
-        
-        try:
-            # 1. 자막 수집
-            with st.spinner(f"자막 수집 중: {video_title[:30]}..."):
-                transcript = get_transcript(video_id)
-            
-            if not transcript:
-                results_container.error(f"❌ 자막 수집 실패: {video_title}")
-                continue
-            
-            # 2. 자막 정리
-            clean_text = clean_transcript(transcript)
-            
-            if len(clean_text.strip()) < 100:
-                results_container.warning(f"⚠️ 자막이 너무 짧음: {video_title}")
-                continue
-            
-            # 3. AI 요약
-            with st.spinner(f"AI 요약 중: {video_title[:30]}..."):
-                summary_data = summarize_transcript(
-                    clean_text, 
-                    video_title, 
-                    st.session_state["selected_channel_title"]
-                )
-            
-            if not summary_data:
-                results_container.error(f"❌ 요약 실패: {video_title}")
-                continue
-            
-            # 4. Notion 저장
-            with st.spinner(f"저장 중: {video_title[:30]}..."):
-                save_success = save_summary_to_notion(summary_data, video_id)
-            
-            if save_success:
-                results_container.success(f"✅ 완료: {video_title}")
-                success_count += 1
-            else:
-                results_container.error(f"❌ 저장 실패: {video_title}")
-        
-        except Exception as e:
-            results_container.error(f"❌ 오류 발생: {video_title} - {str(e)}")
-        
-        # API 호출 간격 (부하 방지)
-        if i < total_videos - 1:  # 마지막이 아니면 대기
-            time.sleep(2)
+    # 메모리 안전을 위해 한 번에 1개씩만 처리
+    st.warning(f"⚠️ 메모리 안정성을 위해 영상을 하나씩 처리합니다.")
     
-    # 완료 메시지
-    progress_bar.progress(1.0)
-    status_text.text("처리 완료!")
+    try:
+        for i, video_info in enumerate(selected_video_info):
+            video_id = video_info["video_id"]
+            video_title = video_info["title"]
+            
+            # 진행률 업데이트
+            progress = (i + 1) / total_videos
+            progress_bar.progress(progress)
+            status_text.text(f"처리 중... ({i + 1}/{total_videos}): {video_title[:50]}...")
+            
+            # 메모리 체크 (더 엄격하게)
+            current_memory = memory_manager.get_memory_usage()["rss"]
+            if current_memory > 800:  # 800MB 초과시
+                results_container.warning(f"⚠️ 메모리 부족으로 처리 중단: {video_title}")
+                memory_manager.force_cleanup(aggressive=True)
+                break
+            
+            # 변수들을 None으로 명시적 초기화
+            transcript = None
+            clean_text = None
+            summary_data = None
+            
+            try:
+                # 1. 자막 수집
+                with st.spinner(f"자막 수집 중: {video_title[:30]}..."):
+                    transcript = get_transcript(video_id)
+                
+                if not transcript:
+                    results_container.error(f"❌ 자막 수집 실패: {video_title}")
+                    continue
+                
+                # 2. 자막 정리
+                clean_text = clean_transcript(transcript)
+                
+                # 🔥 핵심: 원본 자막 즉시 해제
+                del transcript
+                transcript = None
+                gc.collect()
+                
+                if len(clean_text.strip()) < 100:
+                    results_container.warning(f"⚠️ 자막이 너무 짧음: {video_title}")
+                    del clean_text
+                    continue
+                
+                # 3. AI 요약 (Gemini 할당량 체크 추가)
+                with st.spinner(f"AI 요약 중: {video_title[:30]}..."):
+                    try:
+                        summary_data = summarize_transcript(
+                            clean_text, 
+                            video_title, 
+                            st.session_state["selected_channel_title"]
+                        )
+                    except Exception as gemini_error:
+                        error_msg = str(gemini_error)
+                        if "429" in error_msg or "quota" in error_msg.lower():
+                            results_container.error(f"❌ Gemini API 할당량 초과")
+                            st.error("⚠️ Gemini API 할당량 초과. 1분 후 다시 시도하거나 내일 사용해주세요.")
+                            del clean_text
+                            break  # 할당량 초과시 전체 처리 중단
+                        else:
+                            results_container.error(f"❌ 요약 오류: {error_msg}")
+                            del clean_text
+                            continue
+                
+                # 🔥 핵심: 정리된 자막 즉시 해제
+                del clean_text
+                clean_text = None
+                gc.collect()
+                
+                if not summary_data:
+                    results_container.error(f"❌ 요약 실패: {video_title}")
+                    continue
+                
+                # 4. Notion 저장
+                with st.spinner(f"저장 중: {video_title[:30]}..."):
+                    save_success = save_summary_to_notion(summary_data, video_id)
+                
+                # 🔥 핵심: 요약 데이터 즉시 해제
+                del summary_data
+                summary_data = None
+                gc.collect()
+                
+                if save_success:
+                    results_container.success(f"✅ 완료: {video_title}")
+                    success_count += 1
+                else:
+                    results_container.error(f"❌ 저장 실패: {video_title}")
+            
+            except Exception as e:
+                results_container.error(f"❌ 오류 발생: {video_title} - {str(e)}")
+            
+            finally:
+                # 🔥 핵심: 확실한 메모리 정리
+                for var_name in ['transcript', 'clean_text', 'summary_data']:
+                    if var_name in locals() and locals()[var_name] is not None:
+                        del locals()[var_name]
+                
+                # 적극적 메모리 정리
+                memory_manager.force_cleanup(aggressive=True)
+                
+                # 메모리 현황 출력
+                current_mem = memory_manager.get_memory_usage()["rss"]
+                print(f"🧹 {i+1}번째 영상 처리 후 메모리: {current_mem:.1f}MB")
+            
+            # API 호출 간격 (부하 방지 + 메모리 안정화)
+            if i < total_videos - 1:  # 마지막이 아니면 대기
+                time.sleep(5)  # 5초 대기
     
-    if success_count > 0:
-        st.balloons()
-        st.success(f"🎉 총 {success_count}개 영상 요약 완료!")
-        st.session_state["processing_complete"] = True
-    else:
-        st.error("요약에 실패했습니다. 설정을 확인해주세요.")
+    finally:
+        # 완료 메시지
+        progress_bar.progress(1.0)
+        status_text.text("처리 완료!")
+        
+        if success_count > 0:
+            st.balloons()
+            st.success(f"🎉 총 {success_count}개 영상 요약 완료!")
+            st.session_state["processing_complete"] = True
+        else:
+            st.error("요약에 실패했습니다. 설정을 확인해주세요.")
+        
+        # 🔥 핵심: 최종 대청소
+        memory_manager.force_cleanup(aggressive=True)
+        memory_manager.cleanup_session_state(max_items=10)
+        
+        # 세션 상태에서 큰 데이터 정리
+        if "video_list" in st.session_state and len(st.session_state["video_list"]) > 20:
+            st.session_state["video_list"] = st.session_state["video_list"][-10:]
+        
+        if "search_results" in st.session_state:
+            st.session_state["search_results"] = []
+        
+        # 최종 가비지 컬렉션
+        for _ in range(3):
+            gc.collect()
+        
+        final_mem = memory_manager.get_memory_usage()["rss"]
+        print(f"🏁 최종 메모리 사용량: {final_mem:.1f}MB")
+
 
 # 메인 실행 함수
 def main():
     # 세션 상태 초기화
     init_session_state()
+    
+    # 주기적으로 세션 상태 정리 (더 자주)
+    memory_manager.cleanup_session_state(max_items=20)
     
     # 사이드바 메뉴
     st.sidebar.title("🎯 메뉴")
@@ -158,6 +261,8 @@ def show_summary_page():
                 try:
                     channels = search_channel(query)
                     st.session_state["search_results"] = channels
+                    # 검색 후 메모리 정리
+                    gc.collect()
                 except Exception as e:
                     st.error(f"검색 중 오류 발생: {e}")
                     st.session_state["search_results"] = []
@@ -187,6 +292,7 @@ def show_summary_page():
                                 st.session_state["selected_channel"] = ch["channel_id"]
                                 st.session_state["selected_channel_title"] = ch["channel_title"]
                                 st.session_state["search_results"] = []  # 검색 결과 초기화
+                                gc.collect()  # 메모리 정리
                                 st.rerun()
 
     # STEP 2: 채널 선택 이후 영상 목록
@@ -197,13 +303,12 @@ def show_summary_page():
         with col2:
             if st.button("🔄 채널 변경"):
                 # 모든 관련 상태 초기화
-                st.session_state["selected_channel"] = None
-                st.session_state["selected_channel_title"] = None
-                st.session_state["video_list_loaded"] = False
-                st.session_state["video_list"] = []
-                st.session_state["selected_videos"] = []
-                st.session_state["search_results"] = []
-                st.session_state["processing_complete"] = False
+                for key in ["selected_channel", "selected_channel_title", "video_list_loaded", 
+                           "video_list", "selected_videos", "search_results", "processing_complete"]:
+                    st.session_state[key] = None if "selected" in key else False if "loaded" in key or "complete" in key else []
+                
+                # 메모리 정리
+                memory_manager.force_cleanup(aggressive=True)
                 st.rerun()
 
         st.markdown("---")
@@ -213,12 +318,15 @@ def show_summary_page():
         with col1:
             date_option = st.selectbox("📅 기간 선택", ["전체", "최근 7일", "최근 30일"])
         with col2:
-            max_results = st.selectbox("📊 최대 영상 수", [10, 20, 50], index=1)
+            # 메모리 안정성을 위해 적은 수로 제한
+            max_results = st.selectbox("📊 최대 영상 수", [3, 5, 10], index=1)
+            st.info("💡 메모리 안정성을 위해 적은 수를 권장합니다.")
 
+        # datetime 경고 수정
         if date_option == "최근 7일":
-            since = (datetime.utcnow() - timedelta(days=7)).isoformat("T") + "Z"
+            since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat("T").replace("+00:00", "Z")
         elif date_option == "최근 30일":
-            since = (datetime.utcnow() - timedelta(days=30)).isoformat("T") + "Z"
+            since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat("T").replace("+00:00", "Z")
         else:
             since = None
 
@@ -232,6 +340,11 @@ def show_summary_page():
                     st.session_state["video_list"] = videos[:max_results]
                     st.session_state["video_list_loaded"] = True
                     st.session_state["selected_videos"] = []
+                    
+                    # 메모리 정리
+                    del videos
+                    gc.collect()
+                    
                     st.success(f"✅ {len(st.session_state['video_list'])}개 영상을 불러왔습니다!")
                 except Exception as e:
                     st.error(f"영상 목록 불러오기 실패: {e}")
@@ -257,7 +370,7 @@ def show_summary_page():
                 with col3:
                     st.info(f"📊 총 {len(st.session_state['video_list'])}개 영상, {len(st.session_state['selected_videos'])}개 선택됨")
 
-                # 영상 목록 표시
+                # 영상 목록 표시 (페이지네이션은 제거하고 단순화)
                 for i, vid in enumerate(st.session_state["video_list"]):
                     with st.container():
                         col1, col2 = st.columns([1, 4])
@@ -304,6 +417,23 @@ def show_summary_page():
                         if st.session_state.get("processing_complete"):
                             st.success("🎉 처리 완료!")
                     
+                    # 메모리 상태 및 권장사항
+                    current_memory = memory_manager.get_memory_usage()["rss"]
+                    selected_count = len(st.session_state['selected_videos'])
+                    
+                    if current_memory > 500:
+                        st.warning(f"⚠️ 현재 메모리: {current_memory:.0f}MB. 메모리 정리를 권장합니다.")
+                        if st.button("🗑️ 메모리 정리 후 계속"):
+                            memory_manager.force_cleanup(aggressive=True)
+                            whisper_manager.clear_model()
+                            st.rerun()
+                    
+                    if selected_count > 3:
+                        st.warning(f"⚠️ {selected_count}개 영상 선택됨. 메모리 안정성을 위해 3개 이하를 권장합니다.")
+                    
+                    # Gemini API 할당량 주의사항
+                    st.info("💡 Gemini API 할당량: 분당 250K 토큰 제한. 할당량 초과시 처리가 중단됩니다.")
+                    
                     if st.button("🧠 선택한 영상 요약 시작", type="primary"):
                         st.session_state["processing_complete"] = False
                         process_summaries()
@@ -323,6 +453,8 @@ def show_search_page():
             with st.spinner("검색 중..."):
                 try:
                     results = search_summaries_by_keyword(keyword)
+                    # 검색 후 메모리 정리
+                    gc.collect()
                 except Exception as e:
                     st.error(f"검색 중 오류 발생: {e}")
                     results = []
@@ -353,6 +485,7 @@ def show_search_page():
             with st.spinner("불러오는 중..."):
                 try:
                     results = get_recent_summaries(days)
+                    gc.collect()  # 메모리 정리
                 except Exception as e:
                     st.error(f"불러오기 중 오류 발생: {e}")
                     results = []
@@ -381,6 +514,7 @@ def show_dashboard_page():
     with st.spinner("통계 불러오는 중..."):
         try:
             stats = get_database_stats()
+            gc.collect()  # 메모리 정리
         except Exception as e:
             st.error(f"통계 불러오기 실패: {e}")
             stats = {"total_summaries": 0, "sentiment_distribution": {}, "top_channels": []}
@@ -446,6 +580,44 @@ def show_settings_page():
     for api_name, status in api_status.items():
         st.write(f"{status} {api_name}")
     
+    # 메모리 관리 설정
+    st.subheader("🖥️ 메모리 관리 설정")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🗑️ 전체 메모리 정리"):
+            memory_manager.force_cleanup(aggressive=True)
+            memory_manager.cleanup_session_state(max_items=10)
+            # 세션 상태 대청소
+            large_keys = ["video_list", "search_results"]
+            for key in large_keys:
+                if key in st.session_state:
+                    st.session_state[key] = []
+            gc.collect()
+            st.success("메모리 정리 완료!")
+            st.rerun()
+    
+    with col2:
+        if st.button("🤖 Whisper 모델 해제"):
+            whisper_manager.clear_model()
+            st.success("모델 해제 완료!")
+            st.rerun()
+    
+    # 메모리 사용량 임계값 설정
+    st.subheader("⚙️ 메모리 임계값 설정")
+    threshold = st.slider("메모리 경고 임계값 (MB)", 300, 1000, 500, 50)
+    st.info(f"메모리 사용량이 {threshold}MB를 초과하면 경고가 표시됩니다.")
+    
+    # Gemini API 사용량 정보
+    st.subheader("🤖 Gemini API 정보")
+    st.info("""
+    **무료 할당량:** 분당 250,000 토큰
+    **권장사항:** 
+    - 한 번에 3개 이하 영상 처리
+    - 할당량 초과시 1분 대기 후 재시도
+    - 긴 영상(1시간+)은 주의
+    """)
+    
     with st.expander("📋 필요한 환경변수 목록"):
         st.code("""
 # YouTube API
@@ -459,41 +631,51 @@ NOTION_TOKEN=your_notion_token
 NOTION_DATABASE_ID=your_database_id
         """)
     
-    st.subheader("📚 사용 가이드")
-    with st.expander("🎯 Notion 데이터베이스 설정 방법"):
+    st.subheader("📚 메모리 최적화 가이드")
+    with st.expander("🎯 메모리 절약 팁"):
         st.markdown("""
-        1. Notion에서 새 데이터베이스 생성
-        2. 다음 속성들을 추가:
-           - **제목** (Title)
-           - **채널** (Text)
-           - **Video ID** (Text)  
-           - **키워드** (Multi-select)
-           - **감성** (Select: 긍정적, 중립적, 부정적)
-           - **요약 일시** (Date)
-           - **YouTube URL** (URL)
-        3. 데이터베이스 ID를 .env 파일에 추가
-        4. Notion 통합(Integration)을 생성하고 데이터베이스에 연결
+        **메모리 사용량 최적화 방법:**
+        
+        1. **영상 처리 개수 조절**
+           - 한 번에 1-3개씩 처리 권장
+           - 메모리 500MB 초과시 정리 실행
+        
+        2. **자동 정리 활용**
+           - 각 영상 처리 후 자동 메모리 정리
+           - 큰 데이터는 즉시 삭제
+        
+        3. **브라우저 관리**
+           - 장시간 사용시 새로고침 권장
+           - 다른 탭들도 메모리 영향
+        
+        4. **STT 사용 최적화**
+           - 긴 영상(30분+)은 주의
+           - 모델은 필요시에만 로딩
         """)
     
     with st.expander("🔧 문제 해결"):
         st.markdown("""
-        **자주 발생하는 문제:**
+        **발생 가능한 문제들:**
         
-        1. **채널 검색이 안 될 때**
-           - YouTube API 키 확인
-           - API 할당량 확인
+        1. **메모리 부족 오류**
+           - "전체 메모리 정리" 버튼 클릭
+           - 처리할 영상 수 줄이기 (1-2개)
+           - 브라우저 새로고침
         
-        2. **자막 수집 실패**
-           - 영상에 자막이 없는 경우
-           - faster-whisper 설치 확인
+        2. **Gemini API 할당량 초과**
+           - 1분 대기 후 재시도
+           - 영상 수 줄이기
+           - 내일 다시 시도
         
-        3. **요약 실패**
-           - Gemini API 키 확인
-           - 자막 길이가 너무 짧은 경우
+        3. **시스템 응답 느림**
+           - 메모리 사용량 확인
+           - Whisper 모델 해제
+           - 브라우저 재시작
         
-        4. **Notion 저장 실패**
-           - Notion Token 및 Database ID 확인
-           - 데이터베이스 속성 설정 확인
+        4. **STT 처리 실패**
+           - 메모리 부족 가능성
+           - 더 짧은 영상으로 테스트
+           - 모델 해제 후 재시도
         """)
 
 if __name__ == "__main__":
