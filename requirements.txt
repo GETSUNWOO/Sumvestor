@@ -1,23 +1,44 @@
+# Core dependencies
+streamlit>=1.28.0
+google-api-python-client>=2.100.0
+python-dotenv>=1.0.0
+notion-client>=2.2.1
+yt-dlp>=2023.10.13
+google-generativeai>=0.3.0
+requests>=2.31.0
+psutil>=5.9.0
 
-streamlit
-google-api-python-client
-python-dotenv
-notion-client
-yt-dlp
-google-generativeai
-requests
-torch==2.1.0
-faster-whisper
+# STT dependencies
+faster-whisper>=1.0.1
+torch>=2.1.0
+torchaudio>=2.1.0
 
+# Audio processing
+ffmpeg-python>=0.2.0
 
-#streamlit
-#google-api-python-client
-#python-dotenv
-#notion-client               # Notion 저장 기능
-#yt-dlp                      # 영상/자막 다운로드용
-#openai-whisper              # 자막 없을 때 STT
-#google-generativeai         # Gemini API
-#requests                    # HTTP 요청용
-#ffmpeg-python               # 오디오 처리용
+# Optional cloud STT
+google-cloud-speech>=2.21.0  # Google Cloud STT (선택사항)
+openai>=1.3.0                # OpenAI Whisper API (선택사항)
 
-#streamlit run main.py
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Installation commands:
+# pip install -r requirements.txt
+# 
+# For CPU-only PyTorch:
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#
+# For ffmpeg system dependency:
+# Windows: Download from https://ffmpeg.org/download.html
+# macOS: brew install ffmpeg
+# Ubuntu: sudo apt install ffmpeg
+#
+# For Google Cloud STT (optional):
+# 1. pip install google-cloud-speech
+# 2. Set GOOGLE_APPLICATION_CREDENTIALS environment variable
+#
+# For OpenAI STT (optional):
+# 1. pip install openai
+# 2. Set OPENAI_API_KEY environment variable
